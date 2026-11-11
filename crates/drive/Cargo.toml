@@ -33,10 +33,6 @@ windows = { version = "0.62", features = [
 ] }
 notify = "8"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-fuser = "0.15"
-libc = "0.2"
-
 [dev-dependencies]
 kimono-core = { workspace = true, features = ["fake"] }
 tempfile = "3"
