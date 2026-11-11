@@ -2,6 +2,7 @@
 name = "kimono-desktop"
 version.workspace = true
 edition.workspace = true
+repository.workspace = true
 description = "Kimono for your computer: Kimono Drive as a folder, and fast uploads"
 
 [[bin]]

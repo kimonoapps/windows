@@ -8,7 +8,8 @@ use gpui_kit::App;
 use velopack::sources::GithubSource;
 use velopack::{UpdateCheck, UpdateManager};
 
-const RELEASES: &str = "https://github.com/kimonoapps/windows";
+/// Where releases are published: the workspace's repository, so moving it means changing one line.
+const RELEASES: &str = env!("CARGO_PKG_REPOSITORY");
 static READY: Mutex<Option<String>> = Mutex::new(None);
 
 /// The version waiting to install, if one is.
