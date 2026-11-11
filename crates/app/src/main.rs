@@ -2,6 +2,7 @@
 //! Kimono for your computer: lives in the tray, keeps Kimono Drive as a folder (a drive in
 //! Explorer on Windows), and uploads whole folder trees fast. Updates itself.
 
+mod awake;
 mod backup;
 mod backup_view;
 mod signin;
@@ -90,7 +91,9 @@ fn main() {
         tracing::info!("tray up; signed in: {signed_in}");
         if signed_in {
             cx.global::<Kimono>().start_drive();
-            if !handed.is_empty() { open_upload(cx); } else if !background { open_backup(cx); }
+            /* An upload left unfinished (Kimono quit, the computer restarted) carries on by itself. */
+            if !handed.is_empty() || upload::unfinished(cx) { open_upload(cx); }
+            if handed.is_empty() && !background { open_backup(cx); }
         } else {
             open_sign_in(cx);
         }

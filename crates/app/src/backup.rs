@@ -195,6 +195,8 @@ impl Backup {
         };
         let computer = computer_name();
         let mut failed = 0u64;
+        /* Stay awake until this round is done: people start a backup and walk away. */
+        let _awake = crate::awake::hold();
         for folder in folders {
             /* Folders and single files alike; anything gone from this computer is left as it is on Kimono. */
             let is_file = folder.is_file();

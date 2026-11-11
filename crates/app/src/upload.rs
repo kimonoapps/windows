@@ -41,6 +41,23 @@ struct Picker {
     folders: Option<Result<Vec<Node>, String>>,
 }
 
+/// An upload that was started and hasn't finished: kept on disk so a restart carries on with it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Job {
+    destination: String,
+    shown: String,
+    paths: Vec<PathBuf>,
+}
+
+fn job_file(cx: &App) -> PathBuf {
+    cx.global::<Kimono>().paths.data.join("upload-job.json")
+}
+
+/// Whether an upload was left unfinished (Kimono quit, the computer restarted).
+pub fn unfinished(cx: &App) -> bool {
+    job_file(cx).exists()
+}
+
 struct Running {
     upload: Arc<BulkUpload>,
     task: tokio::task::JoinHandle<()>,
@@ -56,12 +73,22 @@ pub struct Upload {
     picker: Option<Picker>,
     running: Option<Running>,
     ticking: bool,
+    /// Carrying on with an unfinished upload: it starts by itself once everything is measured.
+    resuming: bool,
 }
 
 impl Upload {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut me = Self { picked: vec![], open: HashSet::new(), destination: None, picker: None, running: None, ticking: false };
-        me.choose_default_destination(window, cx);
+        let mut me = Self { picked: vec![], open: HashSet::new(), destination: None, picker: None, running: None, ticking: false, resuming: false };
+        let job: Option<Job> = std::fs::read(job_file(cx)).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        match job {
+            Some(job) => {
+                me.destination = Some(Place { id: job.destination, shown: job.shown });
+                me.resuming = true;
+                me.add(job.paths, window, cx);
+            }
+            None => me.choose_default_destination(window, cx),
+        }
         let handed: Vec<PathBuf> = std::mem::take(&mut *cx.global::<Kimono>().handed.lock());
         me.add(handed, window, cx);
         me
@@ -95,9 +122,13 @@ impl Upload {
                 let scanning = cx.background_executor().spawn({ let path = path.clone(); async move { scan::scan(&path, &progress) } });
                 cx.spawn_in(window, async move |this, cx| {
                     let found = Arc::new(scanning.await);
-                    let _ = this.update(cx, |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
                         if let Some(p) = this.picked.iter_mut().find(|p| p.path == path) { p.found = Found::Folder(found); }
                         this.open_biggest();
+                        if this.resuming && !this.picked.iter().any(|p| matches!(p.found, Found::Scanning(_))) {
+                            this.resuming = false;
+                            this.start(window, cx);
+                        }
                         cx.notify();
                     });
                 }).detach();
@@ -169,8 +200,20 @@ impl Upload {
         let folders: Vec<FoundFolder> = self.picked.iter().filter_map(|p| match &p.found { Found::Folder(f) => Some((**f).clone()), _ => None }).collect();
         let files: Vec<PathBuf> = self.picked.iter().filter(|p| matches!(p.found, Found::File(_))).map(|p| p.path.clone()).collect();
         let resume = Arc::new(FileResume::open(kimono.paths.data.join("uploads.json")));
+        /* Kept until it's all up, so a restart carries on with it. */
+        let job = Job { destination: destination.id.clone(), shown: destination.shown.clone(), paths: self.picked.iter().map(|p| p.path.clone()).collect() };
+        let file = job_file(cx);
+        let _ = std::fs::write(&file, serde_json::to_vec(&job).unwrap_or_default());
         let upload = BulkUpload::new(kimono.client.clone(), destination.id, folders, files, Options::default(), Some(resume));
-        let task = kimono.runtime.spawn({ let upload = upload.clone(); async move { upload.run().await } });
+        let task = kimono.runtime.spawn({
+            let upload = upload.clone();
+            async move {
+                /* Stay awake until it's done: people start a big upload and walk away. */
+                let _awake = crate::awake::hold();
+                upload.run().await;
+                if upload.failures().is_empty() { let _ = std::fs::remove_file(&file); }
+            }
+        });
         self.running = Some(Running { upload, task, started: Instant::now(), samples: VecDeque::new(), finished: None });
         self.tick(window, cx);
         cx.notify();
@@ -178,6 +221,8 @@ impl Upload {
 
     fn stop(&mut self, cx: &mut Context<Self>) {
         if let Some(run) = &mut self.running { run.task.abort(); run.finished = Some(Instant::now()); }
+        /* Stopped on purpose: not something to carry on with after a restart. */
+        let _ = std::fs::remove_file(job_file(cx));
         cx.notify();
     }
 
