@@ -17,6 +17,12 @@ async fn until(what: &str, mut ok: impl FnMut() -> bool) {
     }
 }
 
+/// Runs a command in another process, the way Explorer or another app would: Windows doesn't send
+/// the provider callbacks for its own process's file operations.
+fn elsewhere(args: &[&str]) -> std::process::ExitStatus {
+    std::process::Command::new("cmd").arg("/C").args(args).status().expect("running cmd")
+}
+
 fn read(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
@@ -65,8 +71,8 @@ async fn explorer_drive_end_to_end() {
     until("the moved-in folder on Kimono", || fake.find("Outside/inner/deep.txt").is_some_and(|i| i.bytes == b"deep")).await;
 
     // Renaming here renames on Kimono.
-    let renamer = { let (a, b) = (hello_path.clone(), space.join("Docs").join("greeting.txt")); tokio::task::spawn_blocking(move || std::fs::rename(a, b)) };
-    renamer.await.unwrap().expect("renaming");
+    let renamer = { let a = hello_path.clone(); tokio::task::spawn_blocking(move || elsewhere(&["ren", &a.to_string_lossy(), "greeting.txt"])) };
+    assert!(renamer.await.unwrap().success(), "renaming");
     assert_eq!(fake.find("Docs/greeting.txt").map(|i| i.id), Some(hello.id.clone()));
 
     // Editing here saves on Kimono.
@@ -74,8 +80,8 @@ async fn explorer_drive_end_to_end() {
     until("the edit on Kimono", || fake.find("Docs/greeting.txt").is_some_and(|i| i.bytes == b"edited on windows")).await;
 
     // Deleting here sends it to Kimono's trash.
-    let deleter = { let p = space.join("Docs").join("new.txt"); tokio::task::spawn_blocking(move || std::fs::remove_file(p)) };
-    deleter.await.unwrap().expect("deleting");
+    let deleter = { let p = space.join("Docs").join("new.txt"); tokio::task::spawn_blocking(move || elsewhere(&["del", "/q", &p.to_string_lossy()])) };
+    assert!(deleter.await.unwrap().success(), "deleting");
     assert!(fake.find("Docs/new.txt").is_none());
 
     // Changes elsewhere arrive: a rename, an edit, a new file.
