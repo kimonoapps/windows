@@ -41,6 +41,13 @@ fn main() {
             .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "kimono=info,kimono_drive=info,kimono_core=info".into())).init();
     }
 
+    /* A windowed app has nowhere to print a crash: it goes in the log. */
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!("Kimono stopped: {info}\n{backtrace}");
+    }));
+    tracing::info!("Kimono {} starting", kimono_core::client::VERSION);
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let background = args.iter().any(|a| a == "--background");
     let handed: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
@@ -50,6 +57,7 @@ fn main() {
     let handle = runtime.handle().clone();
 
     gpui_kit::application().run(move |cx: &mut App| {
+        tracing::info!("window system up");
         gpui_kit::init(cx);
         theme::load_fonts(cx);
         /* Closing a window leaves Kimono in the tray. */
@@ -60,6 +68,7 @@ fn main() {
         cx.set_global(kimono);
 
         let tray = Tray::new();
+        tracing::info!("tray up; signed in: {signed_in}");
         if signed_in {
             cx.global::<Kimono>().start_drive();
             if !background || !handed.is_empty() { open_upload(cx); }
@@ -115,13 +124,16 @@ fn focus_existing<V: 'static>(cx: &mut App) -> bool {
 pub fn open_sign_in(cx: &mut App) {
     if focus_existing::<signin::SignIn>(cx) { return; }
     let options = window_options(cx, 440., 540.);
-    let _ = gpui_kit::open_window(options, cx, |window, cx| {
+    let opened = gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| signin::SignIn::new(window, cx, |window, cx| {
             cx.global::<Kimono>().start_drive();
             window.remove_window();
             open_upload(cx);
         }))
     });
+    if let Err(e) = opened { tracing::error!("couldn't open the sign-in window: {e:?}"); }
+    /* Started in the background (at sign-in to the computer, from Explorer's menu): come forward. */
+    cx.activate(true);
 }
 
 pub fn open_upload(cx: &mut App) {
@@ -143,7 +155,10 @@ pub fn open_upload(cx: &mut App) {
         return;
     }
     let options = window_options(cx, 940., 660.);
-    let _ = gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| upload::Upload::new(window, cx)));
+    if let Err(e) = gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| upload::Upload::new(window, cx))) {
+        tracing::error!("couldn't open the upload window: {e:?}");
+    }
+    cx.activate(true);
 }
 
 struct Tray {
