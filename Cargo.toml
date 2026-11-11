@@ -9,10 +9,10 @@ license = "UNLICENSED"
 repository = "https://github.com/kimonoapps/windows"
 
 [workspace.dependencies]
-kimono-core = { path = "crates/core" }
+kimono-core = { path = "crates/core", default-features = false }
 kimono-drive = { path = "crates/drive" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json", "stream", "cookies", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "stream", "cookies", "form"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

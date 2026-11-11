@@ -2,10 +2,31 @@
 name = "kimono-desktop"
 version.workspace = true
 edition.workspace = true
+description = "Kimono for your computer: Kimono Drive as a folder, and fast uploads"
 
 [[bin]]
 name = "kimono"
 path = "src/main.rs"
 
 [dependencies]
-gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+kimono-core = { workspace = true, features = ["rustls"] }
+kimono-drive.workspace = true
+gpui-kit = "0.9.1"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+futures.workspace = true
+parking_lot = "0.12"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+dirs = "6"
+velopack = "1.2"
+tray-icon = "0.26"
+image = { version = "0.25", default-features = false, features = ["png"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Registry", "Win32_Foundation", "Win32_UI_Shell"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

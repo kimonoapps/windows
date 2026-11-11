@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig-dev \
+            libx11-xcb-dev libxcb1-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libdbus-1-dev pkg-config
+      - name: Core and sync tests
+        run: cargo test -p kimono-core -p kimono-drive
+      # On Windows this includes the Explorer drive end to end: a real sync root against a fake Kimono.
+      - name: Build the app
+        run: cargo build --release -p kimono-desktop

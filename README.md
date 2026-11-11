@@ -1,0 +1,28 @@
+# Kimono for your computer
+
+A small native app (Rust, GPUI) that lives in the tray:
+
+- **Kimono Drive in Explorer.** Your spaces show up as a Kimono folder in the navigation pane and as a drive letter. Files take no space until opened, "Always keep on this device" keeps them, and edits, renames and deletes go straight to Kimono. Built on the Cloud Files API, like OneDrive. *(Windows; macOS and Linux to follow.)*
+- **Upload a lot, fast.** Drop folders in, see how big everything is (TreeSize-style), pick where on Kimono it goes, and send it: many small files at once, big ones in resumable pieces, anything already there skipped. Also from Explorer's right-click menu: *Upload to Kimono*. *(Windows, macOS, Linux.)*
+- **Updates itself** from this repository's releases (Velopack).
+
+## Layout
+
+| Crate | What |
+| --- | --- |
+| `crates/core` | Kimono's API: in-app sign-in, Drive, tus uploads, the folder scanner and bulk uploader. A fake Kimono for tests (`fake` feature). |
+| `crates/drive` | Keeping a folder in step with Drive: the sync model (pure, tested anywhere) and the Windows Cloud Files provider. |
+| `crates/app` | The GPUI app: tray, sign-in and upload windows, auto-update. |
+
+## Develop
+
+```bash
+cargo test -p kimono-core -p kimono-drive
+cargo run -p kimono-desktop
+```
+
+Against a real Kimono: set `KIMONO_TEST_SERVER`, `KIMONO_TEST_USERNAME` and `KIMONO_TEST_PASSWORD` and the live test signs in and uploads.
+
+## Release
+
+Push a tag like `v0.2.0`. CI builds Windows, macOS and Linux, packs each with Velopack, and publishes them to the release; installed apps pick the update up within hours and install it when they next restart.

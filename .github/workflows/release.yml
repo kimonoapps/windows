@@ -1,0 +1,73 @@
+name: Release
+
+# Push a tag like v0.2.0. Each OS builds, packs with Velopack (installer, full and delta
+# packages), and adds them to the GitHub release that installed apps update from.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: ${{ matrix.channel }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # one upload to the release at a time
+      matrix:
+        include:
+          - os: windows-latest
+            channel: win
+            exe: kimono.exe
+          - os: macos-latest
+            channel: osx
+            exe: kimono
+          - os: ubuntu-22.04
+            channel: linux
+            exe: kimono
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig-dev \
+            libx11-xcb-dev libxcb1-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libdbus-1-dev pkg-config libfuse2
+      - name: Version from the tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          sed -i.bak "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml && rm Cargo.toml.bak
+      - name: Build
+        run: cargo build --release -p kimono-desktop
+      - name: Gather
+        shell: bash
+        run: |
+          mkdir -p publish
+          cp "target/release/${{ matrix.exe }}" publish/
+      - name: Pack and upload
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dotnet tool install -g vpk
+          REPO="https://github.com/${{ github.repository }}"
+          # Earlier releases, so Velopack can make small delta updates from them.
+          vpk download github --repoUrl "$REPO" --token "$GITHUB_TOKEN" --channel ${{ matrix.channel }} || true
+          ICON=crates/app/assets/kimono.ico
+          [ "${{ matrix.channel }}" != "win" ] && ICON=crates/app/assets/kimono-app-icon.png
+          vpk pack --packId Kimono --packTitle Kimono --packVersion "$VERSION" --packDir publish \
+            --mainExe "${{ matrix.exe }}" --icon "$ICON" --channel ${{ matrix.channel }}
+          vpk upload github --repoUrl "$REPO" --token "$GITHUB_TOKEN" --channel ${{ matrix.channel }} \
+            --publish --merge --releaseName "Kimono $VERSION" --tag "$GITHUB_REF_NAME"

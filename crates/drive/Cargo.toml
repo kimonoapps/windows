@@ -2,4 +2,41 @@
 name = "kimono-drive"
 version.workspace = true
 edition.workspace = true
+
 [dependencies]
+kimono-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tracing.workspace = true
+parking_lot = "0.12"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Storage_CloudFilters",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_CorrelationVector",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_System_Registry",
+  "Storage",
+  "Storage_Provider",
+  "Storage_Streams",
+  "Storage_Search",
+  "Foundation",
+  "Foundation_Collections",
+] }
+notify = "8"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = "0.15"
+libc = "0.2"
+
+[dev-dependencies]
+kimono-core = { workspace = true, features = ["fake"] }
+tempfile = "3"

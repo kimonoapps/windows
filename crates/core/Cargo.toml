@@ -24,6 +24,8 @@ parking_lot = "0.12"
 axum = { version = "0.8", optional = true }
 
 [features]
+default = ["rustls"]
+rustls = ["reqwest/rustls"]
 fake = ["dep:axum", "tokio/net"]
 
 [dev-dependencies]

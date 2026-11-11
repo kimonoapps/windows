@@ -1,11 +1,222 @@
-use gpui::{div, prelude::*, px, size, App, Application, Bounds, Context, Window, WindowBounds, WindowOptions};
-struct Hello;
-impl Render for Hello {
-    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement { div().size_full().child("Kimono") }
-}
+#![cfg_attr(windows, windows_subsystem = "windows")]
+//! Kimono for your computer: lives in the tray, keeps Kimono Drive as a folder (a drive in
+//! Explorer on Windows), and uploads whole folder trees fast. Updates itself.
+
+mod signin;
+mod state;
+mod system;
+mod theme;
+mod update;
+mod upload;
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use gpui_kit::*;
+use kimono_drive::Status;
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{TrayIcon, TrayIconBuilder};
+
+use state::Kimono;
+
 fn main() {
-    Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(400.), px(300.)), cx);
-        cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |_, cx| cx.new(|_| Hello)).unwrap();
+    /* Velopack's install, update and uninstall steps run here and exit before anything else. */
+    let app = velopack::VelopackApp::build().on_first_run(|_| {
+        system::set_start_at_login(true);
+        system::set_explorer_menu(true);
     });
+    #[cfg(windows)]
+    let app = app.on_before_uninstall_fast_callback(|_| {
+        system::set_start_at_login(false);
+        system::set_explorer_menu(false);
+        let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap_or_default().join("Kimono"));
+    });
+    let mut app = app;
+    app.run();
+
+    let paths = state::Paths::new();
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.data.join("kimono.log")).ok();
+    if let Some(log) = log {
+        tracing_subscriber::fmt().with_writer(std::sync::Mutex::new(log)).with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "kimono=info,kimono_drive=info,kimono_core=info".into())).init();
+    }
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let background = args.iter().any(|a| a == "--background");
+    let handed: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
+    let Some(arrivals) = system::single_instance(&paths.data, &handed) else { return };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("kimono").build().expect("a runtime");
+    let handle = runtime.handle().clone();
+
+    gpui_kit::application().run(move |cx: &mut App| {
+        gpui_kit::init(cx);
+        theme::load_fonts(cx);
+        /* Closing a window leaves Kimono in the tray. */
+        cx.set_quit_mode(QuitMode::Explicit);
+        let kimono = Kimono::new(handle.clone());
+        kimono.handed.lock().extend(handed.clone());
+        let signed_in = kimono.client.is_signed_in();
+        cx.set_global(kimono);
+
+        let tray = Tray::new();
+        if signed_in {
+            cx.global::<Kimono>().start_drive();
+            if !background || !handed.is_empty() { open_upload(cx); }
+        } else {
+            open_sign_in(cx);
+        }
+        update::start(cx);
+
+        /* The tray's menu, and paths handed over by later launches, a few times a second. */
+        cx.spawn(async move |cx| {
+            let _runtime = runtime;
+            let tray = tray;
+            loop {
+                cx.background_executor().timer(Duration::from_millis(120)).await;
+                while let Ok(event) = MenuEvent::receiver().try_recv() {
+                    let _ = cx.update(|cx| tray.clicked(&event.id, cx));
+                }
+                while let Ok(paths) = arrivals.try_recv() {
+                    let _ = cx.update(|cx| {
+                        cx.global::<Kimono>().handed.lock().extend(paths);
+                        open_upload(cx);
+                    });
+                }
+                let _ = cx.update(|cx| tray.refresh(cx));
+            }
+        }).detach();
+    });
+}
+
+fn window_options(cx: &App, width: f32, height: f32) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(width), px(height)), cx))),
+        titlebar: Some(TitlebarOptions { title: Some("Kimono".into()), ..Default::default() }),
+        window_min_size: Some(size(px(420.), px(420.))),
+        app_id: Some("kimono".into()),
+        ..Default::default()
+    }
+}
+
+/// Brings an open window of this kind forward, if there is one.
+fn focus_existing<V: 'static>(cx: &mut App) -> bool {
+    for window in cx.windows() {
+        if let Some(handle) = window.downcast::<gpui_kit::base::Root>() {
+            let found = handle.update(cx, |root, window, _| {
+                if root.view().clone().downcast::<V>().is_ok() { window.activate_window(); true } else { false }
+            }).unwrap_or(false);
+            if found { return true; }
+        }
+    }
+    false
+}
+
+pub fn open_sign_in(cx: &mut App) {
+    if focus_existing::<signin::SignIn>(cx) { return; }
+    let options = window_options(cx, 440., 540.);
+    let _ = gpui_kit::open_window(options, cx, |window, cx| {
+        cx.new(|cx| signin::SignIn::new(window, cx, |window, cx| {
+            cx.global::<Kimono>().start_drive();
+            window.remove_window();
+            open_upload(cx);
+        }))
+    });
+}
+
+pub fn open_upload(cx: &mut App) {
+    if !cx.global::<Kimono>().client.is_signed_in() { return open_sign_in(cx); }
+    if focus_existing::<upload::Upload>(cx) {
+        /* Hand anything new to the open window. */
+        let handed: Vec<PathBuf> = std::mem::take(&mut *cx.global::<Kimono>().handed.lock());
+        if !handed.is_empty() {
+            for window in cx.windows() {
+                if let Some(handle) = window.downcast::<gpui_kit::base::Root>() {
+                    let _ = handle.update(cx, |root, window, cx| {
+                        if let Ok(view) = root.view().clone().downcast::<upload::Upload>() {
+                            view.update(cx, |u, cx| u.add(handed.clone(), window, cx));
+                        }
+                    });
+                }
+            }
+        }
+        return;
+    }
+    let options = window_options(cx, 940., 660.);
+    let _ = gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| upload::Upload::new(window, cx)));
+}
+
+struct Tray {
+    _icon: Option<TrayIcon>,
+    status: MenuItem,
+    open_folder: MenuItem,
+    upload: MenuItem,
+    login: CheckMenuItem,
+    account: MenuItem,
+    quit: MenuItem,
+}
+
+impl Tray {
+    fn new() -> Self {
+        let status = MenuItem::new("Starting…", false, None);
+        let open_folder = MenuItem::new("Open Kimono folder", true, None);
+        let upload = MenuItem::new("Upload…", true, None);
+        let login = CheckMenuItem::new("Start with this computer", true, system::starts_at_login(), None);
+        let account = MenuItem::new("Sign out", true, None);
+        let quit = MenuItem::new("Quit Kimono", true, None);
+        let menu = Menu::new();
+        let _ = menu.append_items(&[&status, &PredefinedMenuItem::separator(), &open_folder, &upload, &PredefinedMenuItem::separator(), &login, &account, &quit]);
+        /* Linux trays need GTK's loop, which this app doesn't run: there the window is the way in. */
+        let icon = if cfg!(target_os = "linux") { None } else {
+            let image = image::load_from_memory(include_bytes!("../assets/tray.png")).ok().map(|i| i.into_rgba8());
+            let icon = image.and_then(|i| { let (w, h) = i.dimensions(); tray_icon::Icon::from_rgba(i.into_raw(), w, h).ok() });
+            TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Kimono").with_icon_opt(icon).build().ok()
+        };
+        Self { _icon: icon, status, open_folder, upload, login, account, quit }
+    }
+
+    fn clicked(&self, id: &tray_icon::menu::MenuId, cx: &mut App) {
+        if id == self.open_folder.id() { cx.global::<Kimono>().open_folder(); }
+        else if id == self.upload.id() { open_upload(cx); }
+        else if id == self.login.id() { system::set_start_at_login(self.login.is_checked()); }
+        else if id == self.account.id() {
+            if cx.global::<Kimono>().client.is_signed_in() {
+                let kimono = cx.global::<Kimono>();
+                kimono.stop_drive(true);
+                let client = kimono.client.clone();
+                kimono.runtime.spawn(async move { client.sign_out().await });
+                for w in cx.windows() { let _ = w.update(cx, |_, window, _| window.remove_window()); }
+            }
+            open_sign_in(cx);
+        }
+        else if id == self.quit.id() {
+            cx.global::<Kimono>().stop_drive(false);
+            cx.quit();
+        }
+    }
+
+    fn refresh(&self, cx: &mut App) {
+        let kimono = cx.global::<Kimono>();
+        let signed_in = kimono.client.is_signed_in();
+        let text = if !signed_in { "Not signed in".to_string() } else if cfg!(windows) {
+            match kimono.status() {
+                Status::Starting => "Starting…".into(),
+                Status::UpToDate => "Up to date".into(),
+                Status::Syncing { left } if left > 0 => format!("Bringing in {left} changes…"),
+                Status::Syncing { .. } => "Looking for changes…".into(),
+                Status::Offline => "Can't reach Kimono".into(),
+                Status::SignedOut => "Sign in again".into(),
+                Status::Failed(m) => m,
+            }
+        } else { "Signed in".into() };
+        self.status.set_text(text);
+        self.account.set_text(if signed_in { "Sign out" } else { "Sign in…" });
+        self.open_folder.set_enabled(signed_in && cfg!(windows));
+        if let Some(update) = update::ready() { self.status.set_text(format!("Kimono {update} installs when you quit")); }
+    }
+}
+
+trait TrayIconBuilderExt { fn with_icon_opt(self, icon: Option<tray_icon::Icon>) -> Self; }
+impl TrayIconBuilderExt for TrayIconBuilder {
+    fn with_icon_opt(self, icon: Option<tray_icon::Icon>) -> Self { match icon { Some(i) => self.with_icon(i), None => self } }
 }
