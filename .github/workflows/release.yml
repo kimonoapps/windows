@@ -48,7 +48,8 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          sed -i.bak "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml && rm Cargo.toml.bak
+          python3 -c "import re,sys; p='Cargo.toml'; s=open(p).read(); open(p,'w').write(re.sub(r'(?m)^version = \".*\"', 'version = \"'+sys.argv[1]+'\"', s, count=1))" "$VERSION"
+          grep -m1 '^version' Cargo.toml
       - name: Build
         run: cargo build --release -p kimono-desktop
       - name: Gather
@@ -65,9 +66,13 @@ jobs:
           REPO="https://github.com/${{ github.repository }}"
           # Earlier releases, so Velopack can make small delta updates from them.
           vpk download github --repoUrl "$REPO" --token "$GITHUB_TOKEN" --channel ${{ matrix.channel }} || true
-          ICON=crates/app/assets/kimono.ico
-          [ "${{ matrix.channel }}" != "win" ] && ICON=crates/app/assets/kimono-app-icon.png
+          # Windows takes the .ico, Linux the .png; macOS wants an .icns, which comes later.
+          ICON=()
+          case "${{ matrix.channel }}" in
+            win) ICON=(--icon crates/app/assets/kimono.ico) ;;
+            linux) ICON=(--icon crates/app/assets/kimono-app-icon.png) ;;
+          esac
           vpk pack --packId Kimono --packTitle Kimono --packVersion "$VERSION" --packDir publish \
-            --mainExe "${{ matrix.exe }}" --icon "$ICON" --channel ${{ matrix.channel }}
+            --mainExe "${{ matrix.exe }}" "${ICON[@]}" --channel ${{ matrix.channel }}
           vpk upload github --repoUrl "$REPO" --token "$GITHUB_TOKEN" --channel ${{ matrix.channel }} \
             --publish --merge --releaseName "Kimono $VERSION" --tag "$GITHUB_REF_NAME"
