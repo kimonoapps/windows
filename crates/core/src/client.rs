@@ -351,6 +351,25 @@ impl Client {
         self.send_json(Method::POST, &format!("/api/v1/drive/nodes/{}/folders", enc(parent)), json!({ "name": name })).await
     }
 
+    /// The folder at `path` (names, top down) under `root`, making any that aren't there. Returns its id.
+    pub async fn ensure_path(&self, root: &str, path: &[String]) -> Result<String> {
+        let mut at = root.to_string();
+        for name in path {
+            let listing = self.folder(&at).await?;
+            at = match listing.children.into_iter().find(|c| c.is_folder() && c.name.eq_ignore_ascii_case(name)) {
+                Some(found) => found.id,
+                None => match self.create_folder(&at, name).await {
+                    Ok(made) => made.id,
+                    /* Made meanwhile by another run: look again. */
+                    Err(p) if p.status == 409 => self.folder(&at).await?.children.into_iter()
+                        .find(|c| c.is_folder() && c.name.eq_ignore_ascii_case(name)).map(|c| c.id).ok_or(p)?,
+                    Err(p) => return Err(p),
+                },
+            };
+        }
+        Ok(at)
+    }
+
     /// Renames and/or moves.
     pub async fn update(&self, id: &str, name: Option<&str>, parent: Option<&str>) -> Result<Node> {
         let mut body = json!({});

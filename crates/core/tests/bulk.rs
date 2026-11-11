@@ -97,3 +97,33 @@ async fn reads_ranges_and_the_change_feed() {
     assert_eq!(response.text().await.unwrap(), "world");
     assert_eq!(client.changes(start + 1000).await.unwrap_err().status, 410);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backup_replaces_what_changed_and_keeps_the_rest() {
+    let fake = Fake::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Docs/same.txt", 100);
+    write(dir.path(), "Docs/grows.txt", 100);
+    write(dir.path(), "Docs/edited.txt", 100);
+    let options = Options { replace_changed: true, ..Default::default() };
+    let first = BulkUpload::new(fake.client(), ROOT, vec![scan(&dir.path().join("Docs"), &ScanProgress::default())], vec![], options.clone(), None);
+    first.run().await;
+    assert!(first.failures().is_empty(), "{:?}", first.failures());
+    let edited_id = fake.find("Docs/edited.txt").unwrap().id;
+
+    /* Changed here: one grows, one is rewritten at the same size (later than Kimono's copy). */
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let grown = write(dir.path(), "Docs/grows.txt", 300);
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let rewritten = write(dir.path(), "Docs/edited.txt", 100);
+    let again = BulkUpload::new(fake.client(), ROOT, vec![scan(&dir.path().join("Docs"), &ScanProgress::default())], vec![], options, None);
+    again.run().await;
+
+    assert!(again.failures().is_empty(), "{:?}", again.failures());
+    assert_eq!(again.stats.skipped_files.load(Ordering::Relaxed), 1);
+    assert_eq!(fake.find("Docs/grows.txt").unwrap().bytes, grown);
+    let edited = fake.find("Docs/edited.txt").unwrap();
+    assert_eq!(edited.bytes, rewritten);
+    assert_eq!(edited.id, edited_id, "replaced in place, not a copy beside it");
+    assert_eq!(fake.count("file"), 3);
+}

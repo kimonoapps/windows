@@ -10,6 +10,8 @@ use rayon::prelude::*;
 pub struct FoundFile {
     pub name: String,
     pub size: u64,
+    /// Last written, in milliseconds since 1970: how a backup tells a file changed.
+    pub modified: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -80,7 +82,8 @@ fn walk(folder: &mut FoundFolder, progress: &ScanProgress) {
                 if kind.is_dir() {
                     folder.folders.push(FoundFolder { name, path: entry.path(), ..Default::default() });
                 } else if kind.is_file() {
-                    folder.files.push(FoundFile { name, size: meta.len() });
+                    let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or(0);
+                    folder.files.push(FoundFile { name, size: meta.len(), modified });
                 }
             }
         }

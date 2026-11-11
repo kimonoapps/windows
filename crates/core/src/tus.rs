@@ -80,8 +80,13 @@ impl Source {
     pub fn file(path: impl AsRef<Path>) -> Self { Self::File(path.as_ref().to_path_buf()) }
 
     /// `length` bytes from `offset`, read as they are sent, counted through `count`.
-    fn piece(&self, offset: u64, length: u64, progress: Progress, sent: Arc<Mutex<i64>>) -> Body {
-        let count = move |n: usize| { *sent.lock() += n as i64; progress(n as i64); };
+    /// `sent` counts bytes read for this attempt while it is `Some`; the attempt closes it (to `None`) when it
+    /// ends, so a chunk read after the server has already cut the piece off is never counted.
+    fn piece(&self, offset: u64, length: u64, progress: Progress, sent: Arc<Mutex<Option<i64>>>) -> Body {
+        let count = move |n: usize| {
+            let mut open = sent.lock();
+            if let Some(total) = open.as_mut() { *total += n as i64; progress(n as i64); }
+        };
         match self {
             Self::Memory(bytes) => {
                 let piece = bytes.slice(offset as usize..(offset + length) as usize);
@@ -143,11 +148,11 @@ pub async fn send(client: &Client, source: Source, size: u64, metadata: &Metadat
     let mut failures = 0u32;
     loop {
         let length = PIECE.min(size - offset);
-        let sent = Arc::new(Mutex::new(0i64));
+        let sent = Arc::new(Mutex::new(Some(0i64)));
         let at = offset;
         let attempt = client.send(|| {
             /* Each try reads the piece afresh from where the server has it. */
-            let before = std::mem::take(&mut *sent.lock());
+            let before = sent.lock().replace(0).unwrap_or(0);
             if before != 0 { progress(-before); }
             let body = source.piece(at, length, progress.clone(), sent.clone());
             Ok(client.request(Method::PATCH, &location)?
@@ -158,7 +163,7 @@ pub async fn send(client: &Client, source: Source, size: u64, metadata: &Metadat
                 .timeout(Duration::from_secs(600))
                 .body(body))
         }, true).await;
-        let taken = *sent.lock();
+        let taken = sent.lock().take().unwrap_or(0);
         match attempt {
             Ok(response) if response.status() == StatusCode::CONFLICT => {
                 /* Out of step (a dropped piece landed after all): carry on from where the server is. */

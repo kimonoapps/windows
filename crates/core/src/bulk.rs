@@ -27,11 +27,14 @@ pub struct Options {
     pub small_below: u64,
     /// A file already in its folder on Kimono with the same name and size is left alone, so running again carries on.
     pub skip_existing: bool,
+    /// For backups: a file that changed here since Kimono's copy (another size, or written after it)
+    /// replaces that copy, keeping its history, rather than going up beside it.
+    pub replace_changed: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { small_lanes: 16, big_lanes: 4, small_below: 8 * 1024 * 1024, skip_existing: true }
+        Self { small_lanes: 16, big_lanes: 4, small_below: 8 * 1024 * 1024, skip_existing: true, replace_changed: false }
     }
 }
 
@@ -65,7 +68,10 @@ struct Work {
     path: PathBuf,
     name: String,
     size: u64,
+    modified: i64,
     folder: String,
+    /// The Kimono file this replaces, and its content version: for backups of changed files.
+    replaces: Option<(String, i64)>,
 }
 
 pub struct BulkUpload {
@@ -136,7 +142,8 @@ impl BulkUpload {
         for path in &self.files {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            self.queue(Work { path: path.clone(), name, size, folder: self.destination.clone() }, &destination, small, big).await;
+            let modified = std::fs::metadata(path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or(0);
+            self.queue(Work { path: path.clone(), name, size, modified, folder: self.destination.clone(), replaces: None }, &destination, small, big).await;
         }
         let gate = Arc::new(Semaphore::new(6));
         let roots = self.folders.iter().map(|f| self.folder(f, self.destination.clone(), destination.clone(), gate.clone(), small, big));
@@ -158,19 +165,25 @@ impl BulkUpload {
                 }
             };
             for file in &folder.files {
-                self.queue(Work { path: folder.path.join(&file.name), name: file.name.clone(), size: file.size, folder: id.clone() }, &has, small, big).await;
+                self.queue(Work { path: folder.path.join(&file.name), name: file.name.clone(), size: file.size, modified: file.modified, folder: id.clone(), replaces: None }, &has, small, big).await;
             }
             join_all(folder.folders.iter().map(|sub| self.folder(sub, id.clone(), has.clone(), gate.clone(), small, big))).await;
         }.boxed()
     }
 
-    async fn queue(&self, work: Work, has: &Existing, small: &async_channel::Sender<Work>, big: &async_channel::Sender<Work>) {
-        if let Some(there) = has.as_ref().and_then(|h| h.get(&work.name.to_lowercase())) {
-            if !there.is_folder() && there.size == work.size {
+    async fn queue(&self, mut work: Work, has: &Existing, small: &async_channel::Sender<Work>, big: &async_channel::Sender<Work>) {
+        if let Some(there) = has.as_ref().and_then(|h| h.get(&work.name.to_lowercase())).filter(|n| !n.is_folder()) {
+            /* Written after Kimono's copy was saved (with a little slack for clocks and rounding): changed. */
+            let newer = work.modified > there.updated_at as i64 + 2000;
+            let same = there.size == work.size && !(self.options.replace_changed && newer);
+            if same {
                 self.stats.skipped_files.fetch_add(1, Ordering::Relaxed);
                 self.stats.done_files.fetch_add(1, Ordering::Relaxed);
                 self.stats.done_bytes.fetch_add(work.size as i64, Ordering::Relaxed);
                 return;
+            }
+            if self.options.replace_changed {
+                work.replaces = Some((there.id.clone(), there.content_version));
             }
         }
         let lane = if work.size < self.options.small_below { small } else { big };
@@ -243,7 +256,8 @@ impl BulkUpload {
                     stats.done_bytes.fetch_add(n, Ordering::Relaxed);
                 })
             };
-            let sent = tus::send(&self.client, Source::file(&work.path), work.size, &tus::new_file(&work.folder, &work.name), Some(progress), self.resume.as_deref()).await;
+            let metadata = match &work.replaces { Some((id, version)) => tus::replace(id, *version), None => tus::new_file(&work.folder, &work.name) };
+            let sent = tus::send(&self.client, Source::file(&work.path), work.size, &metadata, Some(progress), self.resume.as_deref()).await;
             match sent {
                 Ok(_) => { self.stats.done_files.fetch_add(1, Ordering::Relaxed); }
                 Err(p) => {
