@@ -62,6 +62,8 @@ pub struct Fake {
     pub drop_every: Arc<AtomicUsize>,
     pieces: Arc<AtomicUsize>,
     pub calls: Arc<Mutex<Vec<String>>>,
+    /// While set, every request gets a 503, as from a server that's down behind its proxy.
+    pub down: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn now() -> i64 {
@@ -112,6 +114,7 @@ impl Fake {
             drop_every: Default::default(),
             pieces: Default::default(),
             calls: Default::default(),
+            down: Default::default(),
         };
         fake.address = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new()
@@ -178,6 +181,7 @@ impl Fake {
 
 async fn auth(State(fake): State<Fake>, request: Request, next: Next) -> Response {
     fake.calls.lock().push(format!("{} {}", request.method(), request.uri().path()));
+    if fake.down.load(Ordering::Relaxed) { return StatusCode::SERVICE_UNAVAILABLE.into_response(); }
     let ok = request.headers().get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {TOKEN}"));
     if !ok { return StatusCode::UNAUTHORIZED.into_response(); }
     next.run(request).await

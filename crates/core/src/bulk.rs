@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::future::{join_all, BoxFuture, FutureExt};
 use parking_lot::Mutex;
@@ -198,7 +197,7 @@ impl BulkUpload {
         if let Some(there) = parent_has.as_ref().and_then(|h| h.get(&name.to_lowercase())).filter(|n| n.is_folder()) {
             return Ok((there.id.clone(), listing(there.id.clone()).await?));
         }
-        let mut attempt = 0u32;
+        let mut patience = crate::problem::Patience::new();
         loop {
             match self.client.create_folder(parent, name).await {
                 Ok(made) => {
@@ -214,17 +213,13 @@ impl BulkUpload {
                         None => Err(Problem::say(format!("A file called {name} is already there."))),
                     };
                 }
-                Err(p) if (p.offline() || p.busy()) && attempt < 8 => {
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(1 << attempt.min(6))).await;
-                }
-                Err(p) => return Err(p),
+                Err(p) => if !patience.wait(&p).await { return Err(p); },
             }
         }
     }
 
     async fn existing(&self, folder: &str) -> Result<HashMap<String, Node>> {
-        let mut attempt = 0u32;
+        let mut patience = crate::problem::Patience::new();
         loop {
             match self.client.folder(folder).await {
                 Ok(listing) => {
@@ -232,11 +227,7 @@ impl BulkUpload {
                     for child in listing.children { by_name.entry(child.name.to_lowercase()).or_insert(child); }
                     return Ok(by_name);
                 }
-                Err(p) if (p.offline() || p.busy()) && attempt < 8 => {
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(1 << attempt.min(6))).await;
-                }
-                Err(p) => return Err(p),
+                Err(p) => if !patience.wait(&p).await { return Err(p); },
             }
         }
     }

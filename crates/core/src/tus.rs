@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::client::Client;
 use crate::models::Uploaded;
-use crate::problem::{Problem, Result};
+use crate::problem::{Patience, Problem, Result};
 
 /// Pieces of 32 MB: under the 50 MB some proxies allow, big enough to keep a fast link full.
 pub const PIECE: u64 = 32 * 1024 * 1024;
@@ -125,7 +125,13 @@ fn header(response: &Response, name: &str) -> Option<String> {
 /// Uploads `size` bytes from `source` with tus `metadata`.
 pub async fn send(client: &Client, source: Source, size: u64, metadata: &Metadata, progress: Option<Progress>, resume: Option<&dyn ResumeStore>) -> Result<Uploaded> {
     let progress: Progress = progress.unwrap_or_else(|| Arc::new(|_| {}));
-    let key = format!("{}:{size}", metadata.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"));
+    /* Which upload on the server this is: what it's called and where, its size, and (for a file) when it was
+       last written, so a file rewritten at the same size while half sent starts over instead of mixing. */
+    let modified = match &source {
+        Source::File(path) => std::fs::metadata(path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis()).unwrap_or(0),
+        Source::Memory(_) => 0,
+    };
+    let key = format!("{}:{size}:{modified}", metadata.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"));
     let mut offset = 0u64;
     let mut location = resume.and_then(|r| r.get(&key));
     if let Some(known) = &location {
@@ -145,7 +151,7 @@ pub async fn send(client: &Client, source: Source, size: u64, metadata: &Metadat
     };
     progress(offset as i64);
 
-    let mut failures = 0u32;
+    let mut patience = Patience::new();
     loop {
         let length = PIECE.min(size - offset);
         let sent = Arc::new(Mutex::new(Some(0i64)));
@@ -177,7 +183,7 @@ pub async fn send(client: &Client, source: Source, size: u64, metadata: &Metadat
                 let counted = offset as i64 + taken;
                 if landed as i64 != counted { progress(landed as i64 - counted); }
                 offset = landed;
-                failures = 0;
+                patience.reset();
                 if let Some(id) = header(&response, "Kimono-File") {
                     if let Some(r) = resume { r.set(&key, None); }
                     return Ok(Uploaded { id, conflict: header(&response, "Kimono-Conflict").is_some() });
@@ -189,9 +195,7 @@ pub async fn send(client: &Client, source: Source, size: u64, metadata: &Metadat
             }
             Err(p) if p.offline() || p.busy() => {
                 progress(-taken);
-                failures += 1;
-                if failures > 8 { return Err(p); }
-                tokio::time::sleep(Duration::from_millis((500u64 << failures).min(60_000))).await;
+                if !patience.wait(&p).await { return Err(p); }
                 match current_offset(client, &location).await {
                     Ok(now) => { progress(now as i64 - offset as i64); offset = now; }
                     Err(gone) if gone.status == 404 => {
@@ -214,7 +218,7 @@ pub async fn send(client: &Client, source: Source, size: u64, metadata: &Metadat
 
 async fn create(client: &Client, size: u64, metadata: &Metadata) -> Result<String> {
     let encoded = metadata.iter().map(|(k, v)| format!("{k} {}", STANDARD.encode(v))).collect::<Vec<_>>().join(",");
-    let (mut failures, mut busy) = (0u32, 0u32);
+    let mut patience = Patience::new();
     loop {
         let attempt = client.send(|| Ok(client.request(Method::POST, "/api/v1/drive/uploads")?
             .header("Tus-Resumable", "1.0.0")
@@ -222,16 +226,8 @@ async fn create(client: &Client, size: u64, metadata: &Metadata) -> Result<Strin
             .header("Upload-Metadata", &encoded)), false).await;
         match attempt {
             Ok(response) => return header(&response, "Location").ok_or_else(|| Problem::say("Kimono didn't take the upload.")),
-            Err(p) if p.busy() && busy < 240 => {
-                /* Kimono is holding room for this person's other uploads (200 GB at once): wait for some to land. */
-                busy += 1;
-                tokio::time::sleep(Duration::from_secs(30)).await;
-            }
-            Err(p) if p.offline() && failures < 8 => {
-                failures += 1;
-                tokio::time::sleep(Duration::from_millis((500u64 << failures).min(60_000))).await;
-            }
-            Err(p) => return Err(p),
+            /* Busy: Kimono is holding room for this person's other uploads (200 GB at once); offline: wait it out. */
+            Err(p) => if !patience.wait(&p).await { return Err(p); },
         }
     }
 }

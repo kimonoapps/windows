@@ -127,3 +127,19 @@ async fn a_backup_replaces_what_changed_and_keeps_the_rest() {
     assert_eq!(edited.id, edited_id, "replaced in place, not a copy beside it");
     assert_eq!(fake.count("file"), 3);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn waits_for_kimono_to_come_back() {
+    let fake = Fake::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let bytes: Vec<_> = (0..12).map(|i| write(dir.path(), &format!("Trip/{i}.jpg"), 50_000)).collect();
+    fake.down.store(true, Ordering::Relaxed);
+    let upload = BulkUpload::new(fake.client(), ROOT, vec![scan(&dir.path().join("Trip"), &ScanProgress::default())], vec![], Options::default(), None);
+    let running = tokio::spawn({ let u = upload.clone(); async move { u.run().await } });
+    /* Down for a few seconds, as when the Wi-Fi drops; then back. */
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    fake.down.store(false, Ordering::Relaxed);
+    running.await.unwrap();
+    assert!(upload.failures().is_empty(), "{:?}", upload.failures());
+    for (i, b) in bytes.iter().enumerate() { assert_eq!(&fake.find(&format!("Trip/{i}.jpg")).unwrap().bytes, b); }
+}

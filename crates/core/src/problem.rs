@@ -20,6 +20,10 @@ impl Problem {
     pub fn offline(&self) -> bool {
         self.status == 0 || self.status >= 500
     }
+    /// No answer at all: no connection, the computer asleep or offline. Worth waiting out for hours.
+    pub fn unanswered(&self) -> bool {
+        self.status == 0
+    }
     /// Kimono is holding room for this person's other uploads, or rate limiting: wait and try again.
     pub fn busy(&self) -> bool {
         self.status == 429
@@ -39,3 +43,38 @@ impl From<std::io::Error> for Problem {
 }
 
 pub type Result<T, E = Problem> = std::result::Result<T, E>;
+
+/// How long to keep trying after something goes wrong: hours while there's no connection at all
+/// (people start a backup and walk away; the Wi-Fi drops, the laptop sleeps), a few minutes for a
+/// server that answers with errors, two hours of "busy" (Kimono holding room for other uploads). Start again after any success.
+#[derive(Debug)]
+pub struct Patience {
+    since: Option<std::time::Instant>,
+    tries: u32,
+}
+
+impl Default for Patience {
+    fn default() -> Self { Self::new() }
+}
+
+impl Patience {
+    pub const OFFLINE_FOR: std::time::Duration = std::time::Duration::from_secs(12 * 3600);
+
+    pub fn new() -> Self { Self { since: None, tries: 0 } }
+
+    pub fn reset(&mut self) { self.since = None; self.tries = 0; }
+
+    /// Waits before the next try, or says to give up (`false`) on this problem.
+    pub async fn wait(&mut self, p: &Problem) -> bool {
+        if !(p.offline() || p.busy()) { return false; }
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        self.tries += 1;
+        let enough = if p.unanswered() { since.elapsed() > Self::OFFLINE_FOR }
+            else if p.busy() { since.elapsed() > std::time::Duration::from_secs(2 * 3600) }
+            else { self.tries > 8 };
+        if enough { return false; }
+        let pause = if p.busy() { 30_000 } else { (500u64 << self.tries.min(7)).min(60_000) };
+        tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
+        true
+    }
+}

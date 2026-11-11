@@ -296,7 +296,7 @@ impl Client {
                 _ => "Kimono couldn't do that.",
             };
             let message = failure_of(response).await.unwrap_or_else(|| fallback.into());
-            return Err(Problem::new(message, if code >= 500 { 0 } else { code }));
+            return Err(Problem::new(message, code));
         }
         unreachable!()
     }
