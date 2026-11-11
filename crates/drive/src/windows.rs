@@ -234,7 +234,27 @@ pub struct Provider {
     cancelled: Mutex<HashSet<i64>>,
     /// Paths here that changed, waiting for things to settle before going up.
     pending: Mutex<HashMap<PathBuf, Instant>>,
+    /// Paths Kimono itself is moving or deleting (to follow a change made elsewhere): already done on Kimono.
+    own: Mutex<Vec<String>>,
     stop: AtomicBool,
+}
+
+fn key(path: &Path) -> String {
+    path.to_string_lossy().trim_end_matches('\\').to_lowercase()
+}
+
+/// Runs `f` with `path` (and everything under it) marked as Kimono's own doing.
+fn own<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let k = key(path);
+    if let Some(p) = PROVIDER.get() { p.own.lock().push(k.clone()); }
+    let result = f();
+    if let Some(p) = PROVIDER.get() { let mut own = p.own.lock(); if let Some(i) = own.iter().position(|o| *o == k) { own.remove(i); } }
+    result
+}
+
+fn is_own(path: &Path) -> bool {
+    let k = key(path);
+    PROVIDER.get().is_some_and(|p| p.own.lock().iter().any(|o| k == *o || k.starts_with(&format!("{o}\\"))))
 }
 
 static PROVIDER: OnceLock<Arc<Provider>> = OnceLock::new();
@@ -243,7 +263,7 @@ impl Provider {
     /// Connects to the platform, takes over the engine's disk work, and starts watching for changes here.
     pub fn start(engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> windows::core::Result<Arc<Self>> {
         let provider = PROVIDER.get_or_init(|| Arc::new(Self {
-            engine: engine.clone(), runtime, key: Mutex::new(None), cancelled: Default::default(), pending: Default::default(), stop: AtomicBool::new(false),
+            engine: engine.clone(), runtime, key: Mutex::new(None), cancelled: Default::default(), pending: Default::default(), own: Default::default(), stop: AtomicBool::new(false),
         })).clone();
         let table = [
             CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_FETCH_DATA, Callback: Some(on_fetch) },
@@ -358,7 +378,7 @@ impl Provider {
                     if conflict {
                         /* Ours is the copy now; the other edit comes back under the original name. */
                         let to = path.with_file_name(&entry.name);
-                        if std::fs::rename(&path, &to).is_ok() { rebind(&to, &entry); }
+                        if own(&path, || std::fs::rename(&path, &to)).is_ok() { rebind(&to, &entry); }
                     } else {
                         rebind(&path, &entry);
                     }
@@ -436,7 +456,7 @@ impl Backend for Disk {
                 let (from, to) = (root.join(from), root.join(to));
                 if !from.exists() || from == to { return Ok(()); }
                 if let Some(dir) = to.parent() { std::fs::create_dir_all(dir)?; }
-                std::fs::rename(from, to)
+                own(&from, || std::fs::rename(&from, &to))
             }
             Action::Replace { path, entry } => {
                 let path = root.join(path);
@@ -453,7 +473,7 @@ impl Backend for Disk {
             Action::Remove { path, folder } => {
                 let path = root.join(path);
                 if !path.exists() { return Ok(()); }
-                if *folder { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }
+                own(&path, || if *folder { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) })
             }
         }
     }
@@ -517,7 +537,7 @@ unsafe fn call(info: *const CF_CALLBACK_INFO) -> Call {
         let bytes = unsafe { std::slice::from_raw_parts(info.FileIdentity as *const u8, info.FileIdentityLength as usize) };
         String::from_utf8_lossy(bytes).into_owned()
     };
-    let ours = !info.ProcessInfo.is_null() && unsafe { (*info.ProcessInfo).ProcessId } == std::process::id();
+    let ours = is_own(&path);
     Call { keys: Keys { connection: info.ConnectionKey, transfer: info.TransferKey, request: info.RequestKey }, path, identity, file_size: info.FileSize, ours }
 }
 

@@ -44,6 +44,7 @@ const POLL: Duration = Duration::from_secs(15);
 impl Engine {
     /// `root` is the Kimono folder; `state` the file where what's here is remembered.
     pub fn new(client: Client, root: PathBuf, state: PathBuf) -> Arc<Self> {
+        let root = full_path(root);
         let mirror = std::fs::read(&state).map(|b| Mirror::load(&b)).unwrap_or_default();
         Arc::new(Self { client, root, state, mirror: Mutex::new(mirror), backend: Mutex::new(None), status: watch::channel(Status::Starting).0, wake: Notify::new() })
     }
@@ -235,5 +236,17 @@ impl Engine {
         self.mirror.lock().removed_here(&entry.id);
         self.save();
         Ok(())
+    }
+}
+
+/// The folder's path as the OS reports it back: absolute, with long names (never `RUNNER~1`),
+/// and without the `\\?\` prefix, so paths in the platform's calls compare equal to it.
+fn full_path(root: PathBuf) -> PathBuf {
+    let _ = std::fs::create_dir_all(&root);
+    let Ok(full) = std::fs::canonicalize(&root) else { return root };
+    let text = full.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => full,
     }
 }
