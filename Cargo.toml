@@ -9,7 +9,7 @@ license = "UNLICENSED"
 repository = "https://github.com/kimonoapps/windows"
 
 [workspace.dependencies]
-kimono-core = { path = "crates/core", default-features = false }
+kimono-core = { path = "crates/core" }
 kimono-drive = { path = "crates/drive" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
 reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "stream", "cookies", "form"] }

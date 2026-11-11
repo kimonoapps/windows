@@ -10,7 +10,7 @@ name = "kimono"
 path = "src/main.rs"
 
 [dependencies]
-kimono-core = { workspace = true, features = ["rustls"] }
+kimono-core.workspace = true
 kimono-drive.workspace = true
 gpui-kit = "0.9.1"
 tokio.workspace = true
