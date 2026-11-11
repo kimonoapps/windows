@@ -34,7 +34,9 @@ pub struct Paths {
 
 impl Paths {
     pub fn new() -> Self {
-        let data = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("Kimono");
+        /* On Windows the installer owns %LOCALAPPDATA%\Kimono (and empties it when installing), so what
+           Kimono keeps lives beside it. Elsewhere the app is installed somewhere else entirely. */
+        let data = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join(if cfg!(windows) { "Kimono Data" } else { "Kimono" });
         let folder = dirs::home_dir().unwrap_or_else(std::env::temp_dir).join("Kimono");
         let _ = std::fs::create_dir_all(&data);
         Self { data, folder }
@@ -87,6 +89,9 @@ impl Kimono {
         }
         let mut slot = self.drive.lock();
         if slot.is_some() { return; }
+        /* Debug builds: KIMONO_NO_DRIVE=1 leaves the Kimono folder alone, for narrowing problems down. */
+        #[cfg(debug_assertions)]
+        if std::env::var("KIMONO_NO_DRIVE").is_ok() { return; }
         let engine = Engine::new(self.client.clone(), self.paths.folder.clone(), self.paths.data.join(format!("drive-{}.json", self.account())));
         *self.status.lock() = engine.status();
 

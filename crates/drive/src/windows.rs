@@ -79,26 +79,23 @@ impl Handle {
         }.map_err(io)?;
         Ok(Self(h))
     }
-    /// For changing a placeholder: exclusive, with write access, letting go if another app needs it.
-    fn change(path: &Path) -> std::io::Result<Protected> {
+    /// For changing a placeholder: a plain handle (no oplocks to break or protected handles that can
+    /// close underneath), with the WRITE_DAC access the platform accepts in place of write access,
+    /// so read-only files (shared with you as a viewer) can be updated too.
+    fn change(path: &Path) -> std::io::Result<Handle> {
         let w = wide(path);
-        let h = unsafe { CfOpenFileWithOplock(PCWSTR(w.as_ptr()), CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS) }.map_err(io)?;
-        Ok(Protected(h))
+        let h = unsafe {
+            CreateFileW(PCWSTR(w.as_ptr()), FILE_READ_ATTRIBUTES.0 | FILE_WRITE_ATTRIBUTES.0 | 0x0004_0000 /* WRITE_DAC */,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None)
+        }.map_err(io)?;
+        Ok(Self(h))
     }
+
+    fn win32(&self) -> HANDLE { self.0 }
 }
 
 impl Drop for Handle {
     fn drop(&mut self) { unsafe { let _ = CloseHandle(self.0); } }
-}
-
-struct Protected(HANDLE);
-
-impl Protected {
-    fn win32(&self) -> HANDLE { unsafe { CfGetWin32HandleFromProtectedHandle(self.0) } }
-}
-
-impl Drop for Protected {
-    fn drop(&mut self) { unsafe { CfCloseHandle(self.0) } }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -259,26 +256,31 @@ fn is_own(path: &Path) -> bool {
 
 static PROVIDER: OnceLock<Arc<Provider>> = OnceLock::new();
 
+/// The platform's calls Kimono answers. Static, as the platform may read it for as long as it's connected.
+static CALLBACKS: [CF_CALLBACK_REGISTRATION; 5] = [
+    CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_FETCH_DATA, Callback: Some(on_fetch) },
+    CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_CANCEL_FETCH_DATA, Callback: Some(on_cancel) },
+    CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NOTIFY_DELETE, Callback: Some(on_delete) },
+    CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NOTIFY_RENAME, Callback: Some(on_rename) },
+    CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NONE, Callback: None },
+];
+
 impl Provider {
     /// Connects to the platform, takes over the engine's disk work, and starts watching for changes here.
     pub fn start(engine: Arc<Engine>, runtime: tokio::runtime::Handle) -> windows::core::Result<Arc<Self>> {
         let provider = PROVIDER.get_or_init(|| Arc::new(Self {
             engine: engine.clone(), runtime, key: Mutex::new(None), cancelled: Default::default(), pending: Default::default(), own: Default::default(), stop: AtomicBool::new(false),
         })).clone();
-        let table = [
-            CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_FETCH_DATA, Callback: Some(on_fetch) },
-            CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_CANCEL_FETCH_DATA, Callback: Some(on_cancel) },
-            CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NOTIFY_DELETE, Callback: Some(on_delete) },
-            CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NOTIFY_RENAME, Callback: Some(on_rename) },
-            CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NONE, Callback: None },
-        ];
         let root = wide(&engine.root);
-        let key = unsafe { CfConnectSyncRoot(PCWSTR(root.as_ptr()), table.as_ptr(), None, CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO | CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH) }?;
+        let key = unsafe { CfConnectSyncRoot(PCWSTR(root.as_ptr()), CALLBACKS.as_ptr(), None, CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO | CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH) }?;
         *provider.key.lock() = Some(key);
         provider.stop.store(false, Ordering::Relaxed);
         engine.set_backend(Arc::new(Disk));
-        provider.clone().watch();
-        provider.clone().sweep();
+        /* Debug builds: KIMONO_NO_WATCH=1 skips watching for changes here, for narrowing problems down. */
+        if !(cfg!(debug_assertions) && std::env::var("KIMONO_NO_WATCH").is_ok()) {
+            provider.clone().watch();
+            provider.clone().sweep();
+        }
         Ok(provider)
     }
 
@@ -355,7 +357,8 @@ impl Provider {
     async fn settle(&self, path: &Path) -> Result<(), kimono_core::Problem> {
         if !path.exists() || Self::ignored(path) || path == self.engine.root { return Ok(()); }
         let attributes = attributes(path);
-        match kind(path).map_err(kimono_core::Problem::from)? {
+        let found = kind(path).map_err(kimono_core::Problem::from)?;
+        match found {
             Kind::New => {
                 let entry = self.engine.added(path).await?;
                 let path = path.to_path_buf();

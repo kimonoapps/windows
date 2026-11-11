@@ -49,9 +49,26 @@ pub fn single_instance(data: &Path, paths: &[PathBuf]) -> Option<std::sync::mpsc
     Some(rx)
 }
 
+/// The program to start: the installer's launcher when installed (it stays put across updates,
+/// while the app itself lives in a folder the updater replaces), else this program.
+pub fn launcher() -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    #[cfg(windows)]
+    if let Some(root) = exe.parent().filter(|p| p.file_name().is_some_and(|n| n == "current")).and_then(|p| p.parent()) {
+        let stub = root.join("Kimono.exe");
+        if stub.exists() { return stub; }
+    }
+    exe
+}
+
+/// Keeps the start-at-login entry, if there is one, pointing at the launcher.
+pub fn refresh_start_at_login() {
+    if starts_at_login() { set_start_at_login(true); }
+}
+
 /// Starts with the computer, quietly, in the tray.
 pub fn set_start_at_login(on: bool) {
-    let exe = std::env::current_exe().unwrap_or_default();
+    let exe = launcher();
     #[cfg(windows)]
     {
         let value = format!("\"{}\" --background", exe.display());
@@ -97,7 +114,7 @@ pub fn starts_at_login() -> bool {
 pub fn set_explorer_menu(on: bool) {
     #[cfg(windows)]
     {
-        let exe = std::env::current_exe().unwrap_or_default();
+        let exe = launcher();
         for kind in ["Directory", "*"] {
             let base = format!(r"Software\Classes\{kind}\shell\KimonoUpload");
             if on {

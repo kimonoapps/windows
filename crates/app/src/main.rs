@@ -27,11 +27,17 @@ fn main() {
         system::set_start_at_login(true);
         system::set_explorer_menu(true);
     });
+    /* Installing and updating set these up straight away; the app may not be started by the installer. */
+    #[cfg(windows)]
+    let app = app
+        .on_after_install_fast_callback(|_| { system::set_start_at_login(true); system::set_explorer_menu(true); })
+        .on_after_update_fast_callback(|_| { system::refresh_start_at_login(); system::set_explorer_menu(true); });
     #[cfg(windows)]
     let app = app.on_before_uninstall_fast_callback(|_| {
         system::set_start_at_login(false);
         system::set_explorer_menu(false);
         let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap_or_default().join("Kimono"));
+        let _ = std::fs::remove_dir_all(dirs::data_local_dir().unwrap_or_default().join("Kimono Data"));
     });
     let mut app = app;
     app.run();
