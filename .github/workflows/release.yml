@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.2.0. Each OS builds, packs with Velopack (installer, full and delta
+# Push a tag like v0.2.0. Windows builds, packs with Velopack (installer, full and delta
 # packages), and adds them to the GitHub release that installed apps update from.
 on:
   push:
@@ -20,15 +20,10 @@ jobs:
       max-parallel: 1 # one upload to the release at a time
       matrix:
         include:
+          # Windows only for now; macOS (channel osx) and Linux (channel linux) come back here when they ship.
           - os: windows-latest
             channel: win
             exe: kimono.exe
-          - os: macos-latest
-            channel: osx
-            exe: kimono
-          - os: ubuntu-22.04
-            channel: linux
-            exe: kimono
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
