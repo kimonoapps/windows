@@ -56,6 +56,17 @@ fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("kimono").build().expect("a runtime");
     let handle = runtime.handle().clone();
 
+    /* Debug builds only: sign in from KIMONO_TEST_SERVER/USERNAME/PASSWORD, for testing on a dev machine, and leave. */
+    #[cfg(debug_assertions)]
+    if args.iter().any(|a| a == "--test-sign-in") {
+        let env = |k: &str| std::env::var(k).unwrap_or_default();
+        let client = kimono_core::Client::new(std::sync::Arc::new(state::Keychain));
+        let result = runtime.block_on(client.sign_in(&env("KIMONO_TEST_SERVER"), &env("KIMONO_TEST_USERNAME"), &env("KIMONO_TEST_PASSWORD")));
+        tracing::info!("test sign-in: {result:?}");
+        println!("{result:?}");
+        std::process::exit(if matches!(result, Ok(kimono_core::SignInNext::Done)) { 0 } else { 1 });
+    }
+
     gpui_kit::application().run(move |cx: &mut App| {
         tracing::info!("window system up");
         gpui_kit::init(cx);

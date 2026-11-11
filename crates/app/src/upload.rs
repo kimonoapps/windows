@@ -87,6 +87,7 @@ impl Upload {
     /// Takes folders and files to upload, and starts measuring the folders.
     pub fn add(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         for path in paths {
+            tracing::info!("to upload: {}", path.display());
             if self.picked.iter().any(|p| p.path == path) { continue; }
             if path.is_dir() {
                 let progress = Arc::new(ScanProgress::default());
@@ -96,6 +97,7 @@ impl Upload {
                     let found = Arc::new(scanning.await);
                     let _ = this.update(cx, |this, cx| {
                         if let Some(p) = this.picked.iter_mut().find(|p| p.path == path) { p.found = Found::Folder(found); }
+                        this.open_biggest();
                         cx.notify();
                     });
                 }).detach();
@@ -105,6 +107,14 @@ impl Upload {
         }
         self.tick(window, cx);
         cx.notify();
+    }
+
+    /// Opens the biggest folder one level, so the first look already shows where the space goes.
+    fn open_biggest(&mut self) {
+        if self.picked.iter().any(|p| matches!(p.found, Found::Scanning(_))) || !self.open.is_empty() { return; }
+        if let Some(f) = self.picked.iter().filter_map(|p| match &p.found { Found::Folder(f) => Some(f), _ => None }).max_by_key(|f| f.size) {
+            self.open.insert(f.path.clone());
+        }
     }
 
     /// While something counts up, the window redraws a few times a second.
@@ -259,37 +269,48 @@ impl Upload {
     }
 
     fn render_tree(&self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut rows: Vec<AnyElement> = Vec::new();
-        let biggest = self.picked.iter().map(|x| match &x.found { Found::Folder(f) => f.size, Found::File(s) => *s, Found::Scanning(s) => s.bytes.load(Ordering::Relaxed) }).max().unwrap_or(1).max(1);
-        for (i, picked) in self.picked.iter().enumerate() {
+        let size_of = |x: &Picked| match &x.found { Found::Folder(f) => f.size, Found::File(s) => *s, Found::Scanning(s) => s.bytes.load(Ordering::Relaxed) };
+        /* Biggest first, as TreeSize lists them; each root measured against the biggest, and its share of everything. */
+        let mut order: Vec<&Picked> = self.picked.iter().collect();
+        order.sort_by(|a, b| size_of(b).cmp(&size_of(a)));
+        let biggest = order.first().map(|x| size_of(x)).unwrap_or(1).max(1);
+        let total: u64 = order.iter().map(|x| size_of(x)).sum::<u64>().max(1);
+        let mut rows: Vec<AnyElement> = vec![header(p).into_any_element()];
+        let mut n = 0usize;
+        for picked in order {
+            let name = picked.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| picked.path.to_string_lossy().into_owned());
+            n += 1;
             match &picked.found {
-                Found::Scanning(s) => rows.push(row(i * 100_000, 0, &picked.path.file_name().unwrap_or_default().to_string_lossy(), None,
-                    format!("{} so far", format::bytes(s.bytes.load(Ordering::Relaxed))), format::count(s.files.load(Ordering::Relaxed), "file", "files"), 0., true, p, cx).into_any_element()),
-                Found::File(size) => rows.push(row(i * 100_000, 0, &picked.path.file_name().unwrap_or_default().to_string_lossy(), None,
-                    format::bytes(*size), String::new(), *size as f32 / biggest as f32, false, p, cx).into_any_element()),
-                Found::Folder(f) => {
-                    let mut n = i * 100_000;
-                    self.folder_rows(f, 0, f.size.max(1), &mut rows, &mut n, p, cx);
-                }
+                Found::Scanning(s) => rows.push(row(n, 0, &name, None, format!("{}…", format::bytes(s.bytes.load(Ordering::Relaxed))), None,
+                    format::count(s.files.load(Ordering::Relaxed), "file", "files"), 0., true, p, cx).into_any_element()),
+                Found::File(size) => rows.push(row(n, 0, &name, None, format::bytes(*size), Some(*size as f32 / total as f32), String::new(),
+                    *size as f32 / biggest as f32, false, p, cx).into_any_element()),
+                Found::Folder(f) => self.folder_rows(f, 0, biggest, total, &mut rows, &mut n, p, cx),
             }
         }
         div().id("tree").flex_1().overflow_y_scroll().flex().flex_col().children(rows)
     }
 
+    /// A folder's row and, when open, its folders (biggest first) and then its loose files as one row.
+    /// `measure` is what its bar is measured against; `share_of` what its percentage is of.
     #[allow(clippy::too_many_arguments)]
-    fn folder_rows(&self, f: &FoundFolder, depth: usize, top: u64, rows: &mut Vec<AnyElement>, n: &mut usize, p: &Palette, cx: &mut Context<Self>) {
+    fn folder_rows(&self, f: &FoundFolder, depth: usize, measure: u64, share_of: u64, rows: &mut Vec<AnyElement>, n: &mut usize, p: &Palette, cx: &mut Context<Self>) {
         if rows.len() > 2000 { return; }
         let open = self.open.contains(&f.path);
-        let toggle = f.path.clone();
-        let detail = if f.unreadable > 0 { format!("{} · {} unreadable", format::count(f.file_count, "file", "files"), f.unreadable) } else { format::count(f.file_count, "file", "files") };
+        let mut detail = format::count(f.file_count, "file", "files");
+        if f.unreadable > 0 { detail.push_str(&format!(" · {} unreadable", f.unreadable)); }
         *n += 1;
-        rows.push(row(*n, depth, &f.name, Some((open, toggle)), format::bytes(f.size), detail, f.size as f32 / top as f32, false, p, cx).into_any_element());
+        rows.push(row(*n, depth, &f.name, Some((open, f.path.clone())), format::bytes(f.size), Some(f.size as f32 / share_of.max(1) as f32),
+            detail, f.size as f32 / measure.max(1) as f32, false, p, cx).into_any_element());
         if !open { return; }
-        for sub in f.folders.iter().take(300) { self.folder_rows(sub, depth + 1, top, rows, n, p, cx); }
+        /* Inside, everything is measured against this folder: the bars read as shares of it. */
+        let inside = f.size.max(1);
+        for sub in f.folders.iter().take(300) { self.folder_rows(sub, depth + 1, inside, inside, rows, n, p, cx); }
         if !f.files.is_empty() {
             let bytes: u64 = f.files.iter().map(|x| x.size).sum();
             *n += 1;
-            rows.push(row(*n, depth + 1, &format::count(f.files.len() as u64, "file", "files"), None, format::bytes(bytes), String::new(), bytes as f32 / top as f32, false, p, cx).into_any_element());
+            rows.push(row(*n, depth + 1, &format::count(f.files.len() as u64, "file here", "files here"), None, format::bytes(bytes),
+                Some(bytes as f32 / inside as f32), String::new(), bytes as f32 / inside as f32, false, p, cx).into_any_element());
         }
     }
 
@@ -339,16 +360,36 @@ impl Upload {
     }
 }
 
+const NAME_W: f32 = 260.;
+const SIZE_W: f32 = 84.;
+const SHARE_W: f32 = 52.;
+const FILES_W: f32 = 130.;
+
+fn header(p: &Palette) -> Div {
+    let cell = |w: f32, text: &'static str| div().w(px(w)).text_right().child(text);
+    div().flex().items_center().gap(px(10.)).h(px(28.)).pl(px(32.)).pr(px(12.)).text_size(px(12.)).text_color(p.on_surface_variant)
+        .border_b_1().border_color(p.outline_variant).mb(px(4.))
+        .child(div().w(px(NAME_W - 22.)).child("Name"))
+        .child(div().flex_1())
+        .child(cell(SIZE_W, "Size"))
+        .child(cell(SHARE_W, "%"))
+        .child(cell(FILES_W, "Files"))
+}
+
 #[allow(clippy::too_many_arguments)]
-fn row(n: usize, depth: usize, name: &str, toggle: Option<(bool, PathBuf)>, size: String, detail: String, fraction: f32, scanning: bool, p: &Palette, cx: &mut Context<Upload>) -> Stateful<Div> {
+fn row(n: usize, depth: usize, name: &str, toggle: Option<(bool, PathBuf)>, size: String, share: Option<f32>, detail: String, fraction: f32, scanning: bool, p: &Palette, cx: &mut Context<Upload>) -> Stateful<Div> {
     let chevron = match &toggle { Some((true, _)) => "▾", Some((false, _)) => "▸", None => "" };
-    let mut r = div().id(("row", n)).flex().items_center().gap(px(10.)).h(px(32.)).pl(px(10. + depth as f32 * 18.)).pr(px(12.)).rounded(px(6.))
+    let indent = depth as f32 * 18.;
+    let share = share.map(|s| if s >= 0.995 { "100%".to_string() } else if s >= 0.1 { format!("{:.0}%", s * 100.) } else if s > 0. { format!("{:.1}%", s * 100.) } else { "0%".into() }).unwrap_or_default();
+    let mut r = div().id(("row", n)).flex().items_center().gap(px(10.)).h(px(32.)).pl(px(10.)).pr(px(12.)).rounded(px(6.))
         .hover(|s| s.bg(p.container))
-        .child(div().w(px(12.)).text_color(p.outline).child(chevron))
-        .child(div().w(px(240.)).truncate().text_size(px(14.)).child(name.to_string()))
-        .child(div().flex_1().child(if scanning { theme::bar(0., p).opacity(0.5) } else { theme::bar(fraction, p).h(px(5.)) }))
-        .child(div().w(px(80.)).text_right().text_size(px(13.)).child(size))
-        .child(div().w(px(150.)).text_right().text_size(px(12.)).text_color(p.on_surface_variant).child(detail));
+        .child(div().w(px(NAME_W)).flex().items_center().gap(px(8.)).pl(px(indent))
+            .child(div().w(px(12.)).text_color(p.outline).child(chevron))
+            .child(div().flex_1().truncate().text_size(px(14.)).text_color(if toggle.is_some() || depth == 0 { p.on_surface } else { p.on_surface_variant }).child(name.to_string())))
+        .child(div().flex_1().child(if scanning { theme::bar(0., p).opacity(0.5) } else { theme::bar(fraction, p).h(px(6.)) }))
+        .child(div().w(px(SIZE_W)).text_right().text_size(px(13.)).child(size))
+        .child(div().w(px(SHARE_W)).text_right().text_size(px(12.)).text_color(p.on_surface_variant).child(share))
+        .child(div().w(px(FILES_W)).text_right().text_size(px(12.)).text_color(p.on_surface_variant).child(detail));
     if let Some((_, path)) = toggle {
         r = r.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
             if !this.open.remove(&path) { this.open.insert(path.clone()); }
