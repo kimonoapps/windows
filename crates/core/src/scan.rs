@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rayon::prelude::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FoundFile {
     pub name: String,
     pub size: u64,
@@ -14,7 +14,7 @@ pub struct FoundFile {
     pub modified: i64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FoundFolder {
     pub name: String,
     pub path: PathBuf,

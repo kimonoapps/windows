@@ -21,6 +21,8 @@ futures.workspace = true
 parking_lot = "0.12"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 dirs = "6"
+gethostname = "1"
+notify = "8"
 velopack = "1.2"
 tray-icon = "0.26"
 image = { version = "0.25", default-features = false, features = ["png"] }

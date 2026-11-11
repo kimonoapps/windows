@@ -58,6 +58,9 @@ pub struct Kimono {
     pub status: Mutex<watch::Receiver<Status>>,
     /// Folders and files handed over from Explorer ("Upload to Kimono") or a second launch.
     pub handed: Mutex<Vec<PathBuf>>,
+    /// The folders kept backed up.
+    pub backup: Arc<crate::backup::Backup>,
+    backup_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Global for Kimono {}
@@ -65,7 +68,9 @@ impl Global for Kimono {}
 impl Kimono {
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
         let client = Client::new(Arc::new(Keychain));
-        Self { runtime, client, paths: Paths::new(), drive: Mutex::new(None), status: Mutex::new(watch::channel(Status::Starting).1), handed: Mutex::new(vec![]) }
+        let paths = Paths::new();
+        let backup = crate::backup::Backup::new(client.clone(), &paths.data);
+        Self { runtime, client, paths, drive: Mutex::new(None), status: Mutex::new(watch::channel(Status::Starting).1), handed: Mutex::new(vec![]), backup, backup_task: Mutex::new(None) }
     }
 
     /// The person and Kimono this computer is signed in to, as the folder's account name.
@@ -74,8 +79,12 @@ impl Kimono {
         host.replace([':', '/'], "-")
     }
 
-    /// Starts keeping the Kimono folder in step with Drive.
+    /// Starts keeping the Kimono folder in step with Drive, and the chosen folders backed up.
     pub fn start_drive(&self) {
+        {
+            let mut task = self.backup_task.lock();
+            if task.is_none() { *task = Some(self.runtime.spawn(self.backup.clone().run())); }
+        }
         let mut slot = self.drive.lock();
         if slot.is_some() { return; }
         let engine = Engine::new(self.client.clone(), self.paths.folder.clone(), self.paths.data.join(format!("drive-{}.json", self.account())));
@@ -104,6 +113,7 @@ impl Kimono {
     }
 
     pub fn stop_drive(&self, remove_files: bool) {
+        if let Some(task) = self.backup_task.lock().take() { task.abort(); }
         let Some(drive) = self.drive.lock().take() else { return };
         drive.task.abort();
         #[cfg(windows)]

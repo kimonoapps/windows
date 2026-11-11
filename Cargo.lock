@@ -3897,11 +3897,13 @@ version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
  "futures",
+ "gethostname",
  "gpui-kit",
  "image",
  "keyring",
  "kimono-core",
  "kimono-drive",
+ "notify",
  "parking_lot",
  "serde",
  "serde_json",

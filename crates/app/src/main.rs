@@ -2,6 +2,8 @@
 //! Kimono for your computer: lives in the tray, keeps Kimono Drive as a folder (a drive in
 //! Explorer on Windows), and uploads whole folder trees fast. Updates itself.
 
+mod backup;
+mod backup_view;
 mod signin;
 mod state;
 mod system;
@@ -82,7 +84,7 @@ fn main() {
         tracing::info!("tray up; signed in: {signed_in}");
         if signed_in {
             cx.global::<Kimono>().start_drive();
-            if !background || !handed.is_empty() { open_upload(cx); }
+            if !handed.is_empty() { open_upload(cx); } else if !background { open_backup(cx); }
         } else {
             open_sign_in(cx);
         }
@@ -139,11 +141,22 @@ pub fn open_sign_in(cx: &mut App) {
         cx.new(|cx| signin::SignIn::new(window, cx, |window, cx| {
             cx.global::<Kimono>().start_drive();
             window.remove_window();
-            open_upload(cx);
+            open_backup(cx);
         }))
     });
     if let Err(e) = opened { tracing::error!("couldn't open the sign-in window: {e:?}"); }
     /* Started in the background (at sign-in to the computer, from Explorer's menu): come forward. */
+    cx.activate(true);
+}
+
+/// The main window: the drive, with the folders kept backed up ticked.
+pub fn open_backup(cx: &mut App) {
+    if !cx.global::<Kimono>().client.is_signed_in() { return open_sign_in(cx); }
+    if focus_existing::<backup_view::BackupView>(cx) { return; }
+    let options = window_options(cx, 980., 700.);
+    if let Err(e) = gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| backup_view::BackupView::new(window, cx))) {
+        tracing::error!("couldn't open the backup window: {e:?}");
+    }
     cx.activate(true);
 }
 
@@ -175,6 +188,8 @@ pub fn open_upload(cx: &mut App) {
 struct Tray {
     _icon: Option<TrayIcon>,
     status: MenuItem,
+    backup: MenuItem,
+    open: MenuItem,
     open_folder: MenuItem,
     upload: MenuItem,
     login: CheckMenuItem,
@@ -187,23 +202,26 @@ impl Tray {
         let status = MenuItem::new("Starting…", false, None);
         let open_folder = MenuItem::new("Open Kimono folder", true, None);
         let upload = MenuItem::new("Upload…", true, None);
+        let backup = MenuItem::new("", false, None);
+        let open = MenuItem::new("Open Kimono", true, None);
         let login = CheckMenuItem::new("Start with this computer", true, system::starts_at_login(), None);
         let account = MenuItem::new("Sign out", true, None);
         let quit = MenuItem::new("Quit Kimono", true, None);
         let menu = Menu::new();
-        let _ = menu.append_items(&[&status, &PredefinedMenuItem::separator(), &open_folder, &upload, &PredefinedMenuItem::separator(), &login, &account, &quit]);
+        let _ = menu.append_items(&[&status, &backup, &PredefinedMenuItem::separator(), &open, &open_folder, &upload, &PredefinedMenuItem::separator(), &login, &account, &quit]);
         /* Linux trays need GTK's loop, which this app doesn't run: there the window is the way in. */
         let icon = if cfg!(target_os = "linux") { None } else {
             let image = image::load_from_memory(include_bytes!("../assets/tray.png")).ok().map(|i| i.into_rgba8());
             let icon = image.and_then(|i| { let (w, h) = i.dimensions(); tray_icon::Icon::from_rgba(i.into_raw(), w, h).ok() });
             TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Kimono").with_icon_opt(icon).build().ok()
         };
-        Self { _icon: icon, status, open_folder, upload, login, account, quit }
+        Self { _icon: icon, status, backup, open, open_folder, upload, login, account, quit }
     }
 
     fn clicked(&self, id: &tray_icon::menu::MenuId, cx: &mut App) {
         if id == self.open_folder.id() { cx.global::<Kimono>().open_folder(); }
         else if id == self.upload.id() { open_upload(cx); }
+        else if id == self.open.id() { open_backup(cx); }
         else if id == self.login.id() { system::set_start_at_login(self.login.is_checked()); }
         else if id == self.account.id() {
             if cx.global::<Kimono>().client.is_signed_in() {
@@ -236,6 +254,15 @@ impl Tray {
             }
         } else { "Signed in".into() };
         self.status.set_text(text);
+        self.backup.set_text(match kimono.backup.status() {
+            backup::Status::Off => "Backups: none chosen".to_string(),
+            backup::Status::Idle { failed: 0, last_done: Some(_) } => "Backups up to date".into(),
+            backup::Status::Idle { failed, .. } if failed > 0 => format!("Backups: {failed} files couldn't go up"),
+            backup::Status::Idle { .. } => "Backups waiting to start".into(),
+            backup::Status::Looking { .. } => "Looking for changes to back up…".into(),
+            backup::Status::Sending { done, total, .. } => format!("Backing up {} of {}", kimono_core::format::bytes(done), kimono_core::format::bytes(total)),
+            backup::Status::Failed(m) => format!("Backups: {m}"),
+        });
         self.account.set_text(if signed_in { "Sign out" } else { "Sign in…" });
         self.open_folder.set_enabled(signed_in && cfg!(windows));
         if let Some(update) = update::ready() { self.status.set_text(format!("Kimono {update} installs when you quit")); }
