@@ -1,0 +1,5 @@
+[package]
+name = "kimono-drive"
+version.workspace = true
+edition.workspace = true
+[dependencies]

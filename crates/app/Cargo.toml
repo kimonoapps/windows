@@ -1,0 +1,11 @@
+[package]
+name = "kimono-desktop"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kimono"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
