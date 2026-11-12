@@ -372,7 +372,10 @@ impl Upload {
         let failed = stats.failed_files.load(Ordering::Relaxed);
         let skipped = stats.skipped_files.load(Ordering::Relaxed);
         let finished = run.finished.is_some();
-        let headline = if !finished { format!("{} of {}", format::bytes(done), format::bytes(total)) }
+        let headline = if !finished { match crate::network::holdup() {
+                Some(why) => format!("{why} · {} of {}", format::bytes(done), format::bytes(total)),
+                None => format!("{} of {}", format::bytes(done), format::bytes(total)),
+            } }
             else if failed > 0 { format!("Done, but {} didn't upload", format::count(failed, "file", "files")) }
             else { format!("All {} on Kimono", format::count(files_total, "file", "files")) };
         let mut line = vec![format::count(files_done, "file", "files") + &format!(" of {files_total}")];

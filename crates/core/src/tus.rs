@@ -153,6 +153,8 @@ pub async fn send(client: &Client, source: Source, size: u64, metadata: &Metadat
 
     let mut patience = Patience::new();
     loop {
+        /* Held here while paused (on a phone's hotspot, say). */
+        crate::net::go_ahead().await;
         let length = PIECE.min(size - offset);
         let sent = Arc::new(Mutex::new(Some(0i64)));
         let at = offset;
@@ -220,6 +222,7 @@ async fn create(client: &Client, size: u64, metadata: &Metadata) -> Result<Strin
     let encoded = metadata.iter().map(|(k, v)| format!("{k} {}", STANDARD.encode(v))).collect::<Vec<_>>().join(",");
     let mut patience = Patience::new();
     loop {
+        crate::net::go_ahead().await;
         let attempt = client.send(|| Ok(client.request(Method::POST, "/api/v1/drive/uploads")?
             .header("Tus-Resumable", "1.0.0")
             .header("Upload-Length", size.to_string())

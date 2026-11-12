@@ -5,6 +5,7 @@
 mod awake;
 mod backup;
 mod backup_view;
+mod network;
 mod signin;
 mod state;
 mod system;
@@ -44,6 +45,7 @@ fn main() {
     app.run();
 
     let paths = state::Paths::new();
+    let data_dir = paths.data.clone();
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.data.join("kimono.log")).ok();
     if let Some(log) = log {
         tracing_subscriber::fmt().with_writer(std::sync::Mutex::new(log)).with_ansi(false)
@@ -62,6 +64,7 @@ fn main() {
     let handed: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
     let Some(arrivals) = system::single_instance(&paths.data, &handed) else { return };
 
+    network::watch(data_dir.clone());
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("kimono").build().expect("a runtime");
     let handle = runtime.handle().clone();
 
@@ -202,6 +205,7 @@ struct Tray {
     open_folder: MenuItem,
     upload: MenuItem,
     login: CheckMenuItem,
+    metered: CheckMenuItem,
     account: MenuItem,
     quit: MenuItem,
 }
@@ -214,17 +218,18 @@ impl Tray {
         let backup = MenuItem::new("", false, None);
         let open = MenuItem::new("Open Kimono", true, None);
         let login = CheckMenuItem::new("Start with this computer", true, system::starts_at_login(), None);
+        let metered = CheckMenuItem::new("Pause on mobile data", true, network::pause_on_metered(), None);
         let account = MenuItem::new("Sign out", true, None);
         let quit = MenuItem::new("Quit Kimono", true, None);
         let menu = Menu::new();
-        let _ = menu.append_items(&[&status, &backup, &PredefinedMenuItem::separator(), &open, &open_folder, &upload, &PredefinedMenuItem::separator(), &login, &account, &quit]);
+        let _ = menu.append_items(&[&status, &backup, &PredefinedMenuItem::separator(), &open, &open_folder, &upload, &PredefinedMenuItem::separator(), &login, &metered, &account, &quit]);
         /* Linux trays need GTK's loop, which this app doesn't run: there the window is the way in. */
         let icon = if cfg!(target_os = "linux") { None } else {
             let image = image::load_from_memory(include_bytes!("../assets/tray.png")).ok().map(|i| i.into_rgba8());
             let icon = image.and_then(|i| { let (w, h) = i.dimensions(); tray_icon::Icon::from_rgba(i.into_raw(), w, h).ok() });
             TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Kimono").with_icon_opt(icon).build().ok()
         };
-        Self { _icon: icon, status, backup, open, open_folder, upload, login, account, quit }
+        Self { _icon: icon, status, backup, open, open_folder, upload, login, metered, account, quit }
     }
 
     fn clicked(&self, id: &tray_icon::menu::MenuId, cx: &mut App) {
@@ -232,6 +237,7 @@ impl Tray {
         else if id == self.upload.id() { open_upload(cx); }
         else if id == self.open.id() { open_backup(cx); }
         else if id == self.login.id() { system::set_start_at_login(self.login.is_checked()); }
+        else if id == self.metered.id() { network::set_pause_on_metered(&cx.global::<Kimono>().paths.data, self.metered.is_checked()); }
         else if id == self.account.id() {
             if cx.global::<Kimono>().client.is_signed_in() {
                 let kimono = cx.global::<Kimono>();
@@ -268,6 +274,7 @@ impl Tray {
             backup::Status::Idle { failed: 0, last_done: Some(_) } => "Backups up to date".into(),
             backup::Status::Idle { failed, .. } if failed > 0 => format!("Backups: {failed} files couldn't go up"),
             backup::Status::Idle { .. } => "Backups waiting to start".into(),
+            backup::Status::Looking { .. } | backup::Status::Sending { .. } if network::holdup().is_some() => format!("Backups: {}", network::holdup().unwrap_or_default()),
             backup::Status::Looking { .. } => "Looking for changes to back up…".into(),
             backup::Status::Sending { done, total, .. } => format!("Backing up {} of {}", kimono_core::format::bytes(done), kimono_core::format::bytes(total)),
             backup::Status::Failed(m) => format!("Backups: {m}"),

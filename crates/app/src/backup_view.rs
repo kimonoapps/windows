@@ -240,6 +240,7 @@ impl BackupView {
                 if failed > 0 { format!("Last run {when}; {failed} files couldn't go up") } else { format!("Up to date, {when}") }
             }
             Status::Idle { .. } => "Waiting to start".into(),
+            Status::Looking { .. } | Status::Sending { .. } if crate::network::holdup().is_some() => crate::network::holdup().unwrap_or_default().to_string(),
             Status::Looking { folder } => format!("Looking through {folder}…"),
             Status::Sending { done, total, files_left } => format!("Backing up {} of {} · {} to go", format::bytes(done), format::bytes(total), format::count(files_left, "file", "files")),
             Status::Failed(m) => m,

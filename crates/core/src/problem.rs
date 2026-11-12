@@ -44,7 +44,7 @@ impl From<std::io::Error> for Problem {
 
 pub type Result<T, E = Problem> = std::result::Result<T, E>;
 
-/// How long to keep trying after something goes wrong: hours while there's no connection at all
+/// How long to keep trying after something goes wrong: a week while there's no connection at all
 /// (people start a backup and walk away; the Wi-Fi drops, the laptop sleeps), a few minutes for a
 /// server that answers with errors, two hours of "busy" (Kimono holding room for other uploads). Start again after any success.
 #[derive(Debug)]
@@ -58,7 +58,7 @@ impl Default for Patience {
 }
 
 impl Patience {
-    pub const OFFLINE_FOR: std::time::Duration = std::time::Duration::from_secs(12 * 3600);
+    pub const OFFLINE_FOR: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
 
     pub fn new() -> Self { Self { since: None, tries: 0 } }
 
@@ -73,8 +73,9 @@ impl Patience {
             else if p.busy() { since.elapsed() > std::time::Duration::from_secs(2 * 3600) }
             else { self.tries > 8 };
         if enough { return false; }
-        let pause = if p.busy() { 30_000 } else { (500u64 << self.tries.min(7)).min(60_000) };
-        tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
+        let pause = std::time::Duration::from_millis(if p.busy() { 30_000 } else { (500u64 << self.tries.min(7)).min(60_000) });
+        /* With no connection, the network coming back ends the wait at once. */
+        if p.unanswered() { crate::net::wait_for_network(pause).await; } else { tokio::time::sleep(pause).await; }
         true
     }
 }

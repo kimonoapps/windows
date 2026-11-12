@@ -5,6 +5,7 @@ pub mod bulk;
 pub mod client;
 pub mod format;
 pub mod models;
+pub mod net;
 pub mod problem;
 pub mod scan;
 pub mod secrets;

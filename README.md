@@ -6,7 +6,7 @@ A small native app (Rust, GPUI) that lives in the tray:
 
 - **Kimono Drive in Explorer.** Your spaces show up as a Kimono folder in the navigation pane and as a drive letter. Files take no space until opened, "Always keep on this device" keeps them, and edits, renames and deletes go straight to Kimono. Built on the Cloud Files API, like OneDrive. *(Windows; macOS and Linux to follow.)*
 - **Upload a lot, fast.** Drop folders in, see how big everything is (TreeSize-style), pick where on Kimono it goes, and send it: many small files at once, big ones in resumable pieces, anything already there skipped. Also from Explorer's right-click menu: *Upload to Kimono*. *(Windows, macOS, Linux.)*
-- **Finishes on its own.** Start a backup or upload and walk away: while sending, the computer is kept awake; with no connection, uploads wait for up to 12 hours rather than giving up; and after a restart, an unfinished upload carries on by itself, skipping what's already there and resuming half-sent files where they stopped.
+- **Finishes on its own.** Start a backup or upload and walk away: while sending, the computer is kept awake; when the Wi-Fi drops, uploads say "Waiting for a connection" and carry on the moment it's back (they wait up to a week); on a metered connection such as a phone's hotspot they pause until back on ordinary Wi-Fi (switchable in the tray); and after a restart, an unfinished upload carries on by itself, skipping what's already there and resuming half-sent files where they stopped.
 - **Updates itself** from this repository's releases (Velopack).
 
 ## Layout
